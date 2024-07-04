@@ -1,4 +1,5 @@
-﻿using Ardalis.GuardClauses;
+﻿using System.Text;
+using Ardalis.GuardClauses;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
@@ -8,6 +9,7 @@ using Microsoft.eShopWeb.ApplicationCore.Exceptions;
 using Microsoft.eShopWeb.ApplicationCore.Interfaces;
 using Microsoft.eShopWeb.Infrastructure.Identity;
 using Microsoft.eShopWeb.Web.Interfaces;
+using Newtonsoft.Json;
 
 namespace Microsoft.eShopWeb.Web.Pages.Basket;
 
@@ -20,18 +22,21 @@ public class CheckoutModel : PageModel
     private string? _username = null;
     private readonly IBasketViewModelService _basketViewModelService;
     private readonly IAppLogger<CheckoutModel> _logger;
+    private static readonly HttpClient _client = new HttpClient();
+    private readonly IConfiguration _configuration;
 
     public CheckoutModel(IBasketService basketService,
         IBasketViewModelService basketViewModelService,
         SignInManager<ApplicationUser> signInManager,
         IOrderService orderService,
-        IAppLogger<CheckoutModel> logger)
+        IAppLogger<CheckoutModel> logger, IConfiguration configuration)
     {
         _basketService = basketService;
         _signInManager = signInManager;
         _orderService = orderService;
         _basketViewModelService = basketViewModelService;
         _logger = logger;
+        _configuration = configuration;
     }
 
     public BasketViewModel BasketModel { get; set; } = new BasketViewModel();
@@ -56,6 +61,9 @@ public class CheckoutModel : PageModel
             await _basketService.SetQuantities(BasketModel.Id, updateModel);
             await _orderService.CreateOrderAsync(BasketModel.Id, new Address("123 Main St.", "Kent", "OH", "United States", "44240"));
             await _basketService.DeleteBasketAsync(BasketModel.Id);
+            var reservationTasks = new List<Task>();
+            reservationTasks.AddRange(BasketModel.Items.Select(MakeReservationAsync));
+            await Task.WhenAll(reservationTasks);
         }
         catch (EmptyBasketOnCheckoutException emptyBasketOnCheckoutException)
         {
@@ -93,5 +101,26 @@ public class CheckoutModel : PageModel
         var cookieOptions = new CookieOptions();
         cookieOptions.Expires = DateTime.Today.AddYears(10);
         Response.Cookies.Append(Constants.BASKET_COOKIENAME, _username, cookieOptions);
+    }
+
+    private async Task MakeReservationAsync(BasketItemViewModel product)
+    {
+        string functionUrl = _configuration.GetValue(typeof(string), "baseUrls:reservationService") as string;
+        string functionKey = _configuration.GetValue(typeof(string), "reservationService:functionKey") as string;
+
+        _client.DefaultRequestHeaders.Add("x-functions-key", functionKey);
+
+        var json = JsonConvert.SerializeObject(new
+        {
+            product.Id, product.Quantity
+        });
+        var data = new StringContent(json, Encoding.UTF8, "application/json");
+
+        var response = await _client.PostAsync(functionUrl, data);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogWarning("Failed to reserve product. Status code: " + response.StatusCode);
+        }
     }
 }
