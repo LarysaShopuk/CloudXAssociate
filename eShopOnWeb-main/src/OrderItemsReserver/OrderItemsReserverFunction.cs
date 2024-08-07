@@ -1,10 +1,7 @@
 ﻿using System.IO;
 using System.Threading.Tasks;
 using Azure.Storage.Blobs;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.WebJobs;
-using Microsoft.Azure.WebJobs.Extensions.Http;
-using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using OrderItemsReserver.Models;
@@ -15,41 +12,38 @@ namespace OrderItemsReserver
     public static class OrderItemsReserverFunction
     {
         [FunctionName("OrderItemsReserverFunction")]
-        public static async Task<IActionResult> Run(
-            [HttpTrigger(AuthorizationLevel.Function, "post", Route = null)] HttpRequest req,
+        public static async Task Run(
+            [ServiceBusTrigger("orders", Connection = "ServiceBusConnection")]
+            string orderItem,
+            Int32 deliveryCount,
+            DateTime enqueuedTimeUtc,
+            string messageId,
             [Blob("reservations/{rand-guid}.json", FileAccess.Write)] BlobClient outputBlobClient,
             ILogger log)
         {
-            var requestBody = await new StreamReader(req.Body).ReadToEndAsync();
             ProductReservation productReservation;
+            // deserialize for validation purpose
+            productReservation = JsonConvert.DeserializeObject<ProductReservation>(orderItem);
+            var json = JsonConvert.SerializeObject(orderItem);
+            if (productReservation == null)
+            {
+                log.LogError("Wrong reservation message format passed");
+
+                return;
+            }
+            log.LogInformation($"Start to make reservation for '{productReservation.Id}' product");
             try
             {
-                // deserialize for validation purpose
-                productReservation = JsonConvert.DeserializeObject<ProductReservation>(requestBody);
-                var json = JsonConvert.SerializeObject(requestBody);
-                if (productReservation == null)
-                {
-                    return new BadRequestObjectResult("Got NULL product reservation object");
-                }
-                log.LogInformation($"Start to make reservation for '{productReservation.Id}' product");
-                try
-                {
-                    await outputBlobClient.UploadAsync(BinaryData.FromString(json));
-                }
-                catch (Exception e)
-                {
-                    var message = $"Failed to upload file with reservation details.";
-                    log.LogError(e, message);
-                }
-
-                log.LogInformation($"Made reservation for '{productReservation.Id}' product successfully");
+                await outputBlobClient.UploadAsync(BinaryData.FromString(json));
             }
-            catch
+            catch (Exception e)
             {
-                return new BadRequestObjectResult("Got unexpected product reservation object");
+                var message = $"Failed to upload file with reservation details.";
+                log.LogError(e, message);
+                throw;
             }
 
-            return new OkObjectResult($"Reservation for '{productReservation.Id}' product was created successfully");
+            log.LogInformation($"Made reservation for '{productReservation.Id}' product successfully");
         }
     }
 }

@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
+using Azure.Identity;
 using BlazorShared;
 using Microsoft.ApplicationInsights.AspNetCore.Extensions;
 using Microsoft.ApplicationInsights.DependencyCollector;
@@ -26,9 +27,8 @@ using MinimalApi.Endpoint.Configurations.Extensions;
 using MinimalApi.Endpoint.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
-var aiOptions = new Microsoft.ApplicationInsights.AspNetCore.Extensions.ApplicationInsightsServiceOptions();
 
-aiOptions.RequestCollectionOptions.TrackExceptions = true;
+
 builder.Services.AddApplicationInsightsTelemetry();
 builder.Services.ConfigureTelemetryModule<DependencyTrackingTelemetryModule>((m, o) =>
 {
@@ -37,9 +37,21 @@ builder.Services.ConfigureTelemetryModule<DependencyTrackingTelemetryModule>((m,
 
 builder.Services.AddEndpoints();
 
-// Use to force loading of appsettings.json of test project
-builder.Configuration.AddConfigurationFile("appsettings.test.json");
 builder.Logging.AddConsole();
+
+builder.Services.AddApplicationInsightsTelemetry();
+var connectionString = Environment.GetEnvironmentVariable("AppConfig");
+
+var credential = new ChainedTokenCredential(new AzureDeveloperCliCredential(), new DefaultAzureCredential());
+
+builder.Configuration.AddAzureAppConfiguration(options =>
+{
+    options.Connect(connectionString)
+        .ConfigureKeyVault(kv =>
+        {
+            kv.SetCredential(credential);
+        });
+});
 
 Microsoft.eShopWeb.Infrastructure.Dependencies.ConfigureServices(builder.Configuration, builder.Services);
 
