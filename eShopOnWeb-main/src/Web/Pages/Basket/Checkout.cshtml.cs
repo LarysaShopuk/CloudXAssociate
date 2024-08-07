@@ -1,5 +1,6 @@
 ﻿using System.Text;
 using Ardalis.GuardClauses;
+using Azure.Messaging.ServiceBus;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
@@ -9,6 +10,7 @@ using Microsoft.eShopWeb.ApplicationCore.Exceptions;
 using Microsoft.eShopWeb.ApplicationCore.Interfaces;
 using Microsoft.eShopWeb.Infrastructure.Identity;
 using Microsoft.eShopWeb.Web.Interfaces;
+using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Newtonsoft.Json;
 
 namespace Microsoft.eShopWeb.Web.Pages.Basket;
@@ -24,12 +26,13 @@ public class CheckoutModel : PageModel
     private readonly IAppLogger<CheckoutModel> _logger;
     private static readonly HttpClient _client = new HttpClient();
     private readonly IConfiguration _configuration;
+    private readonly ServiceBusClient _serviceBusClient;
 
     public CheckoutModel(IBasketService basketService,
         IBasketViewModelService basketViewModelService,
         SignInManager<ApplicationUser> signInManager,
         IOrderService orderService,
-        IAppLogger<CheckoutModel> logger, IConfiguration configuration)
+        IAppLogger<CheckoutModel> logger, IConfiguration configuration, ServiceBusClient serviceBusClient)
     {
         _basketService = basketService;
         _signInManager = signInManager;
@@ -37,6 +40,7 @@ public class CheckoutModel : PageModel
         _basketViewModelService = basketViewModelService;
         _logger = logger;
         _configuration = configuration;
+        _serviceBusClient = serviceBusClient;
     }
 
     public BasketViewModel BasketModel { get; set; } = new BasketViewModel();
@@ -64,6 +68,8 @@ public class CheckoutModel : PageModel
             var reservationTasks = new List<Task>();
             reservationTasks.AddRange(BasketModel.Items.Select(MakeReservationAsync));
             await Task.WhenAll(reservationTasks);
+
+            await CreateDeliveryItemAsync(BasketModel);
         }
         catch (EmptyBasketOnCheckoutException emptyBasketOnCheckoutException)
         {
@@ -105,14 +111,41 @@ public class CheckoutModel : PageModel
 
     private async Task MakeReservationAsync(BasketItemViewModel product)
     {
-        string functionUrl = _configuration.GetValue(typeof(string), "baseUrls:reservationService") as string;
-        string functionKey = _configuration.GetValue(typeof(string), "reservationService:functionKey") as string;
-
-        _client.DefaultRequestHeaders.Add("x-functions-key", functionKey);
+        string queueName = _configuration.GetValue(typeof(string), "QueueName") as string;
 
         var json = JsonConvert.SerializeObject(new
         {
             product.Id, product.Quantity
+        });
+        await using ServiceBusSender sender = _serviceBusClient.CreateSender(queueName);
+        try
+        {
+            var message = new ServiceBusMessage(json);
+            Console.WriteLine($"Sending message: {json}");
+            await sender.SendMessageAsync(message);
+        }
+        catch (Exception exception)
+        {
+            Console.WriteLine($"{DateTime.Now} :: Exception: {exception.Message}");
+        }
+        finally
+        {
+            await sender.DisposeAsync();
+        }
+    }
+
+    private async Task CreateDeliveryItemAsync(BasketViewModel basket)
+    {
+        string functionUrl = _configuration.GetValue(typeof(string), "baseUrls:deliveryService") as string;
+
+        var json = JsonConvert.SerializeObject(new
+        {
+            Id = Guid.NewGuid(),
+            CustomerName = basket.BuyerId,
+            ShippingAddress = "123 Fake St, City, Country, 12345",
+            Price = basket.Total(),
+            Items = basket.Items
+
         });
         var data = new StringContent(json, Encoding.UTF8, "application/json");
 
@@ -120,7 +153,7 @@ public class CheckoutModel : PageModel
 
         if (!response.IsSuccessStatusCode)
         {
-            _logger.LogWarning("Failed to reserve product. Status code: " + response.StatusCode);
+            _logger.LogWarning("Failed to send order to Delivery service. Status code: " + response.StatusCode);
         }
     }
 }
